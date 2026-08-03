@@ -11,6 +11,7 @@ The idea: give an AI agent a small but real LLM training setup and let it experi
 The repo is deliberately kept small and only really has three files that matter:
 
 - **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
+- **`tracking.py`** — MLflow logging for each experiment. Not modified by the agent.
 - **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
 - **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
 
@@ -53,9 +54,40 @@ The `program.md` file is essentially a super lightweight "skill".
 
 ```
 prepare.py      — constants, data prep + runtime utilities (do not modify)
+tracking.py     — MLflow experiment logging (do not modify)
 train.py        — model, optimizer, training loop (agent modifies this)
 program.md      — agent instructions
 pyproject.toml  — dependencies
+```
+
+## Experiment tracking
+
+Every run logs to MLflow automatically — hyperparameters, the per-step training
+loss curve, the final metrics, and the exact `train.py` that produced them, so a
+run in the UI stays self-describing after the branch has moved on. The default
+server is `http://192.168.0.252:5000`; override it per-run or in your shell:
+
+```bash
+export MLFLOW_TRACKING_URI=http://your-host:5000   # where to log
+export MLFLOW_EXPERIMENT_NAME=autoresearch         # experiment to log under
+AUTORESEARCH_NOTE="increase LR to 0.04" uv run train.py
+```
+
+Tracking is best-effort by design. If the server is unreachable, `train.py` prints
+one warning and trains normally — an overnight loop should never lose experiments
+because a logging host went down. Two properties worth knowing:
+
+- **Per-step metrics never touch the network.** They're buffered in memory and
+  flushed once after training ends, because `train.py` times its own steps to
+  enforce the 5-minute budget and report MFU. Logging inside that window would
+  corrupt both numbers.
+- **An unreachable server costs ~2s per run**, not the ~35s MLflow's default retry
+  policy would spend, which matters when you're doing 100 runs a night.
+
+To run a tracking server on your GPU box:
+
+```bash
+uv run mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow.db
 ```
 
 ## Design choices

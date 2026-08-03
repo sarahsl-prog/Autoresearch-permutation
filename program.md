@@ -27,6 +27,8 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
+- Modify `tracking.py`. It is read-only. It logs each experiment to MLflow.
+- Remove the `tracking.*` calls in `train.py`. There are four (`import tracking`, `tracking.start`, `tracking.log_step`, `tracking.log_summary`/`finish`). Rewrite everything around them freely, but carry them through — if you drop them the experiment still runs and still scores, it just vanishes from the record. In particular keep `tracking.log_step` **outside** the `t0`/`t1` timing window; moving it inside would charge network latency to the time budget and corrupt the MFU number.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
 
@@ -63,7 +65,15 @@ grep "^val_bpb:" run.log
 
 ## Logging results
 
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
+Every run also logs itself to MLflow automatically (hyperparameters, the training
+loss curve, the final metrics, and a copy of the `train.py` that produced them).
+That happens without you doing anything beyond setting `AUTORESEARCH_NOTE`. If the
+tracking server is unreachable the run prints a one-line warning and continues
+normally — that is not a failure, do not try to fix it, and do not let it change
+your keep/discard decision.
+
+`results.tsv` is still the ratchet's own record, so keep maintaining it:
+log each experiment there (tab-separated, NOT comma-separated — commas break in descriptions).
 
 The TSV has a header row and 5 columns:
 
@@ -96,7 +106,9 @@ LOOP FOREVER:
 1. Look at the git state: the current branch/commit we're on
 2. Tune `train.py` with an experimental idea by directly hacking the code.
 3. git commit
-4. Run the experiment: `uv run train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+4. Run the experiment, passing the same one-line description you'll put in the TSV so the MLflow run is labelled:
+   `AUTORESEARCH_NOTE="increase LR to 0.04" uv run train.py > run.log 2>&1`
+   (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)

@@ -24,6 +24,7 @@ repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/fl
 fa3 = get_kernel(repo).flash_attn_interface
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
+import tracking  # harness-owned; keep the tracking.* calls below when editing this file
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -496,6 +497,16 @@ tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
 grad_accum_steps = TOTAL_BATCH_SIZE // tokens_per_fwdbwd
 
+# Hyperparameters are collected by name from globals(), so renaming or adding one
+# above is picked up automatically.
+tracking.start(params={
+    **tracking.collect_hyperparams(globals()),
+    **{f"config.{k}": v for k, v in asdict(config).items()},
+    "grad_accum_steps": grad_accum_steps,
+    "num_params": num_params,
+    "flops_per_token": num_flops_per_token,
+})
+
 optimizer = model.setup_optimizer(
     unembedding_lr=UNEMBEDDING_LR,
     embedding_lr=EMBEDDING_LR,
@@ -589,6 +600,19 @@ while True:
 
     print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
 
+    # Buffered in memory only — deliberately after t1 so it costs the budget nothing.
+    tracking.log_step(step, {
+        "train_loss": train_loss_f,
+        "train_loss_smooth": debiased_smooth_loss,
+        "lr_multiplier": lrm,
+        "step_time_ms": dt * 1000,
+        "tokens_per_sec": tok_per_sec,
+        "mfu_percent": mfu,
+        "muon_momentum": muon_momentum,
+        "weight_decay": muon_weight_decay,
+        "epoch": epoch,
+    })
+
     # GC management (Python's GC causes ~500ms stalls)
     if step == 0:
         gc.collect()
@@ -628,3 +652,18 @@ print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
 print(f"num_steps:        {step}")
 print(f"num_params_M:     {num_params / 1e6:.1f}")
 print(f"depth:            {DEPTH}")
+
+tracking.log_summary({
+    "val_bpb": val_bpb,
+    "training_seconds": total_training_time,
+    "total_seconds": t_end - t_start,
+    "startup_seconds": startup_time,
+    "peak_vram_mb": peak_vram_mb,
+    "peak_vram_gb": peak_vram_mb / 1024,
+    "steady_state_mfu_percent": steady_state_mfu,
+    "total_tokens_M": total_tokens / 1e6,
+    "num_steps": step,
+    "num_params_M": num_params / 1e6,
+    "depth": DEPTH,
+})
+tracking.finish()
