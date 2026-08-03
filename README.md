@@ -11,6 +11,7 @@ The idea: give an AI agent a small but real LLM training setup and let it experi
 The repo is deliberately kept small and only really has three files that matter:
 
 - **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
+- **`objective.py`** — the judge: defines the goal, measures the run, computes the score. Not modified by the agent.
 - **`tracking.py`** — MLflow logging for each experiment. Not modified by the agent.
 - **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
 - **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
@@ -54,11 +55,40 @@ The `program.md` file is essentially a super lightweight "skill".
 
 ```
 prepare.py      — constants, data prep + runtime utilities (do not modify)
+objective.py    — the goal, the meters, the score (do not modify)
 tracking.py     — MLflow experiment logging (do not modify)
 train.py        — model, optimizer, training loop (agent modifies this)
 program.md      — agent instructions
 pyproject.toml  — dependencies
 ```
+
+## Changing the goal
+
+`objective.py` decides what "better" means. Its `GOAL` constant selects a scorer,
+and the agent cannot reach the file:
+
+```python
+GOAL = "min_bpb"              # lowest bits/byte — the original goal
+# GOAL = "min_bpb_under_vram" # same, but anything over VRAM_LIMIT_GB is rejected
+# GOAL = "min_bpb_x_params"   # quality per parameter
+```
+
+The score is printed as `score:`, written to `run.json`, and appended to
+`results.jsonl` along with every other metric. `alternative-goals.md` sketches the
+goals this scaffolding was built for — latency-aware scoring, out-of-distribution
+evaluation, token or FLOP budgets instead of wall clock.
+
+Two structural rules make goal-swapping safe, and they're worth knowing before you
+edit `train.py` by hand:
+
+- **`GPT.forward` is the eval contract.** `evaluate_bpb` calls it and treats the
+  result as plain cross-entropy. New training objectives go in `GPT.training_loss`,
+  which is free to diverge — auxiliary heads, multi-token prediction, z-loss — with
+  no effect on how the run is scored.
+- **The judge owns the meters.** Parameter count, peak VRAM, FLOPs and wall clock
+  are measured in `objective.py`, not reported by the file under test. That barely
+  matters while the goal is `min_bpb`; it matters a great deal for any goal that
+  scores a resource.
 
 ## Experiment tracking
 

@@ -23,8 +23,9 @@ cap = torch.cuda.get_device_capability()
 repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
 fa3 = get_kernel(repo).flash_attn_interface
 
-from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
-import tracking  # harness-owned; keep the tracking.* calls below when editing this file
+from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader
+import objective  # harness-owned: defines the goal, measures, and reports
+import tracking   # harness-owned; keep the tracking.* calls below when editing this file
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -206,22 +207,6 @@ class GPT(nn.Module):
         window_sizes[-1] = (long_window, 0)
         return window_sizes
 
-    def estimate_flops(self):
-        """Estimated FLOPs per token (forward + backward)."""
-        nparams = sum(p.numel() for p in self.parameters())
-        value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds.values())
-        nparams_exclude = (self.transformer.wte.weight.numel() + value_embeds_numel +
-                          self.resid_lambdas.numel() + self.x0_lambdas.numel())
-        h = self.config.n_head
-        q = self.config.n_embd // self.config.n_head
-        t = self.config.sequence_len
-        attn_flops = 0
-        for window_size in self.window_sizes:
-            window = window_size[0]
-            effective_seq = t if window < 0 else min(window, t)
-            attn_flops += 12 * h * q * effective_seq
-        return 6 * (nparams - nparams_exclude) + attn_flops
-
     def num_scaling_params(self):
         wte = sum(p.numel() for p in self.transformer.wte.parameters())
         value_embeds = sum(p.numel() for p in self.value_embeds.parameters())
@@ -266,7 +251,12 @@ class GPT(nn.Module):
             group["initial_lr"] = group["lr"]
         return optimizer
 
-    def forward(self, idx, targets=None, reduction='mean'):
+    def trunk(self, idx):
+        """Hidden states just before the unembedding.
+
+        Split out so training_loss can hang auxiliary heads off the trunk
+        without going anywhere near the eval path.
+        """
         B, T = idx.size()
         assert T <= self.cos.size(1)
         cos_sin = self.cos[:, :T], self.sin[:, :T]
@@ -278,18 +268,40 @@ class GPT(nn.Module):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
             x = block(x, ve, cos_sin, self.window_sizes[i])
-        x = norm(x)
+        return norm(x)
 
+    def logits_from(self, x):
         softcap = 15
-        logits = self.lm_head(x)
-        logits = logits.float()
-        logits = softcap * torch.tanh(logits / softcap)
+        logits = self.lm_head(x).float()
+        return softcap * torch.tanh(logits / softcap)
 
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1),
-                                   ignore_index=-1, reduction=reduction)
-            return loss
-        return logits
+    def forward(self, idx, targets=None, reduction='mean'):
+        """EVAL CONTRACT — do not change what this returns.
+
+        prepare.evaluate_bpb calls model(x, y, reduction='none') and treats the
+        result as plain next-token cross-entropy in nats. It is the scoreboard.
+        Change the loss here and you change the number that decides whether your
+        own experiment gets kept, which is a silent way to break the ratchet.
+
+        Put new training objectives in training_loss() below instead.
+        """
+        logits = self.logits_from(self.trunk(idx))
+        if targets is None:
+            return logits
+        return F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1),
+                               ignore_index=-1, reduction=reduction)
+
+    def training_loss(self, idx, targets):
+        """THE TRAINING OBJECTIVE — fair game, make it as weird as you like.
+
+        Free to diverge from forward(): auxiliary heads, multi-token prediction,
+        z-loss, label smoothing, distillation. Whatever it returns is what gets
+        backpropagated, and evaluation is unaffected.
+
+        Must return a scalar. Baseline is plain next-token cross-entropy, i.e.
+        exactly the eval metric.
+        """
+        return self.forward(idx, targets)
 
 # ---------------------------------------------------------------------------
 # Optimizer (MuonAdamW, single GPU only)
@@ -489,9 +501,10 @@ param_counts = model.num_scaling_params()
 print("Parameter counts:")
 for key, value in param_counts.items():
     print(f"  {key:24s}: {value:,}")
-num_params = param_counts['total']
-num_flops_per_token = model.estimate_flops()
-print(f"Estimated FLOPs per token: {num_flops_per_token:e}")
+num_params = objective.count_params(model)
+num_flops_per_token = objective.flops_per_token(model)
+print(f"Estimated FLOPs per token: {num_flops_per_token:e}" if num_flops_per_token
+      else "Estimated FLOPs per token: unavailable (MFU will be reported as 0)")
 
 tokens_per_fwdbwd = DEVICE_BATCH_SIZE * MAX_SEQ_LEN
 assert TOTAL_BATCH_SIZE % tokens_per_fwdbwd == 0
@@ -505,6 +518,7 @@ tracking.start(params={
     "grad_accum_steps": grad_accum_steps,
     "num_params": num_params,
     "flops_per_token": num_flops_per_token,
+    "goal": objective.GOAL,
 })
 
 optimizer = model.setup_optimizer(
@@ -516,7 +530,12 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
+raw_model = model
 model = torch.compile(model, dynamic=False)
+# torch.compile wraps forward() only — attribute access on the wrapper falls
+# through to the eager module, so training_loss has to be compiled explicitly.
+# Miss this and it silently runs eager and MFU collapses.
+compute_training_loss = torch.compile(raw_model.training_loss, dynamic=False)
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
@@ -556,7 +575,7 @@ while True:
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
-            loss = model(x, y)
+            loss = compute_training_loss(x, y)
         train_loss = loss.detach()
         loss = loss / grad_accum_steps
         loss.backward()
@@ -580,6 +599,7 @@ while True:
     # Fast fail: abort if loss is exploding or NaN
     if math.isnan(train_loss_f) or train_loss_f > 100:
         print("FAIL")
+        objective.log_crash(f"diverged at step {step}, loss={train_loss_f}")
         exit(1)
 
     torch.cuda.synchronize()
@@ -595,7 +615,8 @@ while True:
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1))
     pct_done = 100 * progress
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
-    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+    mfu = (100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+           if num_flops_per_token else 0.0)
     remaining = max(0, TIME_BUDGET - total_training_time)
 
     print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
@@ -631,39 +652,23 @@ print()  # newline after \r training log
 
 total_tokens = step * TOTAL_BATCH_SIZE
 
-# Final eval
+steady_state_mfu = (100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10)
+                    / total_training_time / H100_BF16_PEAK_FLOPS
+                    if total_training_time > 0 and num_flops_per_token else 0)
+
+# Evaluation, scoring, the summary block, run.json and results.jsonl all happen
+# in objective.py. Everything passed here is telemetry only this loop can know;
+# anything measurable from outside (params, VRAM, wall clock) is measured there.
 model.eval()
 with autocast_ctx:
-    val_bpb = evaluate_bpb(model, tokenizer, DEVICE_BATCH_SIZE)
+    metrics = objective.report(model, tokenizer, DEVICE_BATCH_SIZE, stats={
+        "training_seconds": total_training_time,
+        "startup_seconds": t_start_training - t_start,
+        "mfu_percent": steady_state_mfu,
+        "total_tokens_M": total_tokens / 1e6,
+        "num_steps": step,
+        "depth": DEPTH,
+    })
 
-# Final summary
-t_end = time.time()
-startup_time = t_start_training - t_start
-steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
-peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
-
-print("---")
-print(f"val_bpb:          {val_bpb:.6f}")
-print(f"training_seconds: {total_training_time:.1f}")
-print(f"total_seconds:    {t_end - t_start:.1f}")
-print(f"peak_vram_mb:     {peak_vram_mb:.1f}")
-print(f"mfu_percent:      {steady_state_mfu:.2f}")
-print(f"total_tokens_M:   {total_tokens / 1e6:.1f}")
-print(f"num_steps:        {step}")
-print(f"num_params_M:     {num_params / 1e6:.1f}")
-print(f"depth:            {DEPTH}")
-
-tracking.log_summary({
-    "val_bpb": val_bpb,
-    "training_seconds": total_training_time,
-    "total_seconds": t_end - t_start,
-    "startup_seconds": startup_time,
-    "peak_vram_mb": peak_vram_mb,
-    "peak_vram_gb": peak_vram_mb / 1024,
-    "steady_state_mfu_percent": steady_state_mfu,
-    "total_tokens_M": total_tokens / 1e6,
-    "num_steps": step,
-    "num_params_M": num_params / 1e6,
-    "depth": DEPTH,
-})
+tracking.log_summary(metrics)
 tracking.finish()
