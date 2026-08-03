@@ -153,6 +153,36 @@ uv run mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///ml
 - **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
 - **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
 
+## NVIDIA GB10 / DGX Spark (sm_121)
+
+GB10 reports CUDA capability **12.1**, and PyTorch prints:
+
+```
+Found GPU0 NVIDIA GB10 which is of cuda capability 12.1.
+Minimum and Maximum cuda capability supported by this version of PyTorch is (8.0) - (12.0)
+```
+
+**This warning is benign and does not go away.** sm_120 and sm_121 are binary
+compatible, so sm_120 kernels run correctly on GB10; PyTorch's range check simply
+predates 12.1. No official wheel carries native sm_121 cubins — cu128 and cu130
+both stop at sm_120 — so changing index silences nothing.
+
+What does matter on this hardware:
+
+- **Use the cu130 index** (already configured). CUDA 13.0 is the first toolkit
+  whose NVRTC natively knows sm_121, and it publishes the `linux_aarch64` wheels
+  GB10 needs, since it pairs the Blackwell GPU with a Grace ARM CPU.
+- **Flash-Attention 3 is the real blocker.** `train.py` fetches a prebuilt FA3
+  kernel, and those ship precompiled cubins with no sm_121 target and no PTX to
+  JIT from. NVIDIA's own DGX Spark guidance is to skip flash-attn entirely and
+  use PyTorch SDPA, which with cuDNN 9.13 is *faster* on GB10 anyway.
+- If you build any custom CUDA yourself, `export TORCH_CUDA_ARCH_LIST="12.1a"`.
+
+A community wheel with native sm_121 kernels exists at
+[Qanatpharma/pytorch-sm121-gb10](https://huggingface.co/Qanatpharma/pytorch-sm121-gb10),
+but it is a 2.12 nightly built for **cp312 only**, so it would mean dropping back
+to Python 3.12. Not needed given binary compatibility.
+
 ## Platform support
 
 This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. I'm not 100% sure that I want to take this on personally right now. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
