@@ -3,7 +3,11 @@ name = "autoresearch"
 version = "0.1.0"
 description = "Autonomous pretraining research swarm"
 readme = "README.md"
-requires-python = ">=3.10"
+# Upper bound is torch.compile, not the wheels: torch 2.9.1 publishes cp314
+# wheels, but its check_if_dynamo_supported() raises on Python 3.14+, and this
+# training loop compiles the model and both optimizer steps with fullgraph=True.
+# Better to fail at resolution than at runtime.
+requires-python = ">=3.10,<3.14"
 dependencies = [
     "kernels>=0.11.7",
     "matplotlib>=3.10.8",
