@@ -1,0 +1,44 @@
+name: format
+
+# Skipped on autoresearch/* branches: the agent pushes a commit per experiment,
+# roughly 100 a night, and none of them need a CI run.
+on:
+  push:
+    branches-ignore:
+      - 'autoresearch/**'
+  pull_request:
+
+concurrency:
+  group: format-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # Only ruff — deliberately not `uv sync`, which would pull ~2GB of CUDA
+      # wheels to run a formatter. Pinned so a ruff release can't turn the tree
+      # red on its own.
+      - name: Install ruff
+        run: pip install ruff==0.16.1
+
+      # Formatting is enforced on the files this fork owns. train.py and
+      # prepare.py are deliberately exempt: they come from upstream
+      # (karpathy/autoresearch), so reformatting them would mean a permanent
+      # merge conflict with every upstream change — and train.py is rewritten by
+      # the agent ~100 times a night, which no formatter should be arbitrating.
+      # Add new harness files to this list.
+      - name: Check formatting (harness files)
+        run: ruff format --check --diff objective.py tracking.py
+
+      # Lint runs everywhere, including train.py. The rule set is F + E9 only —
+      # undefined names, unused imports, syntax errors — so it catches a broken
+      # edit without imposing style on agent-written code.
+      - name: Lint
+        run: ruff check --output-format github .

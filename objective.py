@@ -43,9 +43,9 @@ RUN_JSON_PATH = os.path.join(_REPO_DIR, "run.json")
 # The goal
 # ---------------------------------------------------------------------------
 
-GOAL = "min_bpb"          # <- the only line a human edits
+GOAL = "min_bpb"  # <- the only line a human edits
 
-VRAM_LIMIT_GB = 20.0      # used by min_bpb_under_vram
+VRAM_LIMIT_GB = 20.0  # used by min_bpb_under_vram
 
 
 def _min_bpb(m):
@@ -71,7 +71,7 @@ def _min_bpb_x_params(m):
     already produce, which is why it's here and a latency goal isn't yet.
     """
     params_m = m.get("num_params_M") or 1.0
-    return m["val_bpb"] * (params_m ** 0.05)
+    return m["val_bpb"] * (params_m**0.05)
 
 
 SCORERS = {
@@ -96,6 +96,7 @@ def score(metrics):
 # ---------------------------------------------------------------------------
 # Meters — measured here, not reported by train.py
 # ---------------------------------------------------------------------------
+
 
 def count_params(model):
     """Total parameters. Deliberately generic: sums whatever the model has."""
@@ -130,7 +131,8 @@ def flops_per_token(model):
         nparams = sum(p.numel() for p in model.parameters())
         # Embedding lookups and per-layer scalars are not matmuls.
         embedding_numel = sum(
-            m.weight.numel() for m in model.modules()
+            m.weight.numel()
+            for m in model.modules()
             if isinstance(m, torch.nn.Embedding)
         )
         scalar_numel = sum(p.numel() for p in model.parameters() if p.ndim <= 1)
@@ -141,7 +143,11 @@ def flops_per_token(model):
         t = config.sequence_len
         attn_flops = 0
         for window_size in model.window_sizes:
-            window = window_size[0] if isinstance(window_size, (tuple, list)) else window_size
+            window = (
+                window_size[0]
+                if isinstance(window_size, (tuple, list))
+                else window_size
+            )
             effective_seq = t if window < 0 else min(window, t)
             attn_flops += 12 * h * q * effective_seq
         return 6 * dense + attn_flops
@@ -152,8 +158,9 @@ def flops_per_token(model):
 
 def _git(*args, default=""):
     try:
-        out = subprocess.run(["git", "-C", _REPO_DIR, *args],
-                             capture_output=True, text=True, timeout=5)
+        out = subprocess.run(
+            ["git", "-C", _REPO_DIR, *args], capture_output=True, text=True, timeout=5
+        )
         return out.stdout.strip() if out.returncode == 0 else default
     except Exception:
         return default
@@ -165,8 +172,16 @@ def _git(*args, default=""):
 
 # Printed in this order. Kept as `key: value` lines so the old greps still work.
 _SUMMARY_ORDER = [
-    "score", "val_bpb", "training_seconds", "total_seconds", "peak_vram_mb",
-    "mfu_percent", "total_tokens_M", "num_steps", "num_params_M", "depth",
+    "score",
+    "val_bpb",
+    "training_seconds",
+    "total_seconds",
+    "peak_vram_mb",
+    "mfu_percent",
+    "total_tokens_M",
+    "num_steps",
+    "num_params_M",
+    "depth",
 ]
 
 
@@ -202,8 +217,10 @@ def report(model, tokenizer, batch_size, stats):
     train_s, total_s = metrics.get("training_seconds"), metrics["total_seconds"]
     if train_s is not None and train_s > total_s + 1.0:
         metrics["timing_inconsistent"] = True
-        print(f"[objective] WARNING: reported training_seconds={train_s:.1f} exceeds "
-              f"measured wall clock {total_s:.1f}s")
+        print(
+            f"[objective] WARNING: reported training_seconds={train_s:.1f} exceeds "
+            f"measured wall clock {total_s:.1f}s"
+        )
 
     metrics["score"] = score(metrics)
     metrics["goal"] = GOAL
@@ -226,8 +243,11 @@ def _format(key, value):
 def _print_summary(metrics):
     print("---")
     keys = [k for k in _SUMMARY_ORDER if k in metrics and metrics[k] is not None]
-    keys += sorted(k for k in metrics
-                   if k not in _SUMMARY_ORDER and k != "goal" and metrics[k] is not None)
+    keys += sorted(
+        k
+        for k in metrics
+        if k not in _SUMMARY_ORDER and k != "goal" and metrics[k] is not None
+    )
     print(f"{'goal:':20s}{metrics['goal']}")
     for key in keys:
         print(f"{key + ':':20s}{_format(key, metrics[key])}")
@@ -287,8 +307,10 @@ def record_decision(status, note=None):
 
     with open(RESULTS_PATH, "w") as f:
         f.write("\n".join(lines) + "\n")
-    print(f"[objective] recorded {status} for commit {record.get('commit')} "
-          f"(score={record.get('score')})")
+    print(
+        f"[objective] recorded {status} for commit {record.get('commit')} "
+        f"(score={record.get('score')})"
+    )
 
 
 def log_crash(note=None):
@@ -333,8 +355,12 @@ def best_so_far(rows=None, goal=None):
     """Lowest score among kept runs, for the current goal."""
     rows = load_results() if rows is None else rows
     goal = goal or GOAL
-    scored = [r for r in rows
-              if r.get("status") == "keep" and r.get("goal") == goal
-              and isinstance(r.get("score"), (int, float))
-              and not math.isinf(r["score"])]
+    scored = [
+        r
+        for r in rows
+        if r.get("status") == "keep"
+        and r.get("goal") == goal
+        and isinstance(r.get("score"), (int, float))
+        and not math.isinf(r["score"])
+    ]
     return min((r["score"] for r in scored), default=None)
