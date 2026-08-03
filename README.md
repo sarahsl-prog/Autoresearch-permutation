@@ -54,13 +54,40 @@ The `program.md` file is essentially a super lightweight "skill".
 ## Project structure
 
 ```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-objective.py    — the goal, the meters, the score (do not modify)
-tracking.py     — MLflow experiment logging (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
+prepare.py        — constants, data prep + runtime utilities (do not modify)
+objective.py      — the goal, the meters, the score (do not modify)
+tracking.py       — MLflow experiment logging (do not modify)
+harness_check.py  — static guard on train.py's contract (do not modify)
+train.py          — model, optimizer, training loop (agent modifies this)
+program.md        — agent instructions
+pyproject.toml    — dependencies
 ```
+
+## The harness contract
+
+`train.py` is rewritten every experiment, and most breakage is loud — the run
+crashes and the ratchet discards it. Three failure modes are silent, because the
+run still trains and still produces a score:
+
+- a dropped `tracking.*` call, so the experiment never reaches MLflow
+- `tracking.log_step` moved inside the timed window, so `training_seconds` and
+  MFU quietly include network latency
+- a training objective placed in `GPT.forward`, which is what `evaluate_bpb`
+  calls — silently changing the number that decides whether that same experiment
+  is kept
+
+`harness_check.py` catches all three by parsing `train.py` — stdlib only, no
+torch, no GPU, a few milliseconds:
+
+```bash
+uv run python harness_check.py
+```
+
+It runs two ways: CI fails on it, and `objective.py` calls it at import so a
+broken edit shows up at the top of `run.log` inside the overnight loop, where CI
+doesn't run. Checks are conservative — anything it can't establish confidently is
+reported as `skipped` rather than failed, since a false alarm would just teach the
+agent to work around the guard.
 
 ## Changing the goal
 

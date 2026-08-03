@@ -35,10 +35,17 @@ jobs:
       # the agent ~100 times a night, which no formatter should be arbitrating.
       # Add new harness files to this list.
       - name: Check formatting (harness files)
-        run: ruff format --check --diff objective.py tracking.py
+        run: ruff format --check --diff objective.py tracking.py harness_check.py
 
       # Lint runs everywhere, including train.py. The rule set is F + E9 only —
       # undefined names, unused imports, syntax errors — so it catches a broken
       # edit without imposing style on agent-written code.
       - name: Lint
         run: ruff check --output-format github .
+
+      # train.py is rewritten every experiment. Most breakage crashes the run and
+      # is discarded by the ratchet; this catches the kinds that don't — a dropped
+      # tracking call, log_step moved inside the timed window, a loss placed in
+      # the eval path. Stdlib only, so it needs no dependencies at all.
+      - name: Check train.py harness contract
+        run: python harness_check.py

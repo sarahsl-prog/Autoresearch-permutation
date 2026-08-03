@@ -31,6 +31,7 @@ import subprocess
 
 import torch
 
+import harness_check
 from prepare import evaluate_bpb
 
 _REPO_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,6 +39,12 @@ _IMPORT_TIME = time.time()
 
 RESULTS_PATH = os.path.join(_REPO_DIR, "results.jsonl")
 RUN_JSON_PATH = os.path.join(_REPO_DIR, "run.json")
+
+# Warn — never fail — if train.py has drifted from its contract with the harness.
+# CI is the hard gate, but CI does not run on autoresearch/* branches, so this is
+# what puts a dropped tracking call at the top of run.log where the agent will
+# see it. Costs a few milliseconds of AST parsing at startup.
+harness_check.warn()
 
 # ---------------------------------------------------------------------------
 # The goal

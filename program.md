@@ -32,6 +32,8 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 - Modify `tracking.py`. It is read-only. It logs each experiment to MLflow.
 - Change what `GPT.forward` returns. `prepare.evaluate_bpb` calls `model(x, y, reduction='none')` and treats the result as plain next-token cross-entropy. It is the scoreboard. Putting a different loss there silently changes the number that decides whether your own experiment gets kept. **New training objectives go in `GPT.training_loss` instead** — see below.
 - Remove the harness calls in `train.py`: `objective.report`, `objective.log_crash`, and the four `tracking.*` calls. Rewrite everything around them freely, but carry them through. Keep `tracking.log_step` **outside** the `t0`/`t1` timing window; moving it inside would charge network latency to the time budget and corrupt the MFU number.
+
+  This is checked. `uv run python harness_check.py` verifies it in a few milliseconds without touching the GPU, and every run prints `[harness] WARNING: ...` at the top of `run.log` if the contract is broken. **If you see one of those warnings, fix it before trusting the run** — the experiment will still train and still produce a score, which is exactly what makes this failure worth guarding. Run the check yourself after any large restructuring of `train.py`.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 
 **The goal: get the lowest `score`.** The script prints it; `objective.py` defines it. Under the default goal (`min_bpb`) the score is just `val_bpb`, so this is the same thing as before — but read the `goal:` line rather than assuming, because the human can change it between runs and a different goal may price in memory, model size or other costs.
