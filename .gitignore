@@ -19,6 +19,9 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 
+# Local config — copy .env.example, which IS tracked
+.env
+
 # Results files (per-machine, not shared history)
 results.tsv
 results.jsonl

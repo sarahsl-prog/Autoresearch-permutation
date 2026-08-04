@@ -317,6 +317,13 @@ def log_summary(metrics, artifacts=()):
                 _warn(f"artifact not found, skipping: {path}")
         except Exception as e:
             _warn(f"could not log artifact {path} ({type(e).__name__}: {e})")
+            if "credential" in f"{type(e).__name__} {e}".lower():
+                _warn(
+                    "  -> the tracking server uses an S3-style artifact store. Set "
+                    "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY, plus "
+                    "MLFLOW_S3_ENDPOINT_URL if it is MinIO. Metrics and params are "
+                    "logging fine; only the train.py artifact is being dropped."
+                )
 
     diff = _git("diff", "HEAD~1", "--", "train.py")
     if diff:
