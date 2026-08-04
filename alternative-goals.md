@@ -6,6 +6,11 @@ optimizes for something other than "lowest `val_bpb` in 5 minutes of wall clock"
 Nothing here is guaranteed to work. Everything is meant to be cheap enough to
 try, and each item names the specific lines that would have to change.
 
+> **Status:** sections 1 and 2 are now implemented — the `forward`/`training_loss`
+> split, the meters moving into the judge, `objective.py`, `run.json`, and
+> `results.jsonl`. Sections 3-6 are still proposals, but the scaffolding they
+> assumed is in place, so each is now a smaller change than described.
+
 ---
 
 ## 1. Where the goal actually lives today
@@ -45,7 +50,10 @@ number that decides whether its own experiment is kept. That is not adversarial
 reward hacking — it is an honest agent breaking the scoreboard by accident.
 
 **Prerequisite refactor for almost everything below:** split the model's forward
-pass from its loss.
+pass from its loss. *(Implemented. `GPT.trunk` / `GPT.forward` / `GPT.training_loss`
+now exist, and `train.py` compiles `training_loss` separately — `torch.compile`
+wraps `forward` only, so calling the method through the wrapper would have run it
+eager and collapsed MFU.)*
 
 ```python
 # train.py — replace the tail of GPT.forward
@@ -87,12 +95,27 @@ has to move out of `train.py` first.
 General principle worth adopting before adding any new goal: *the judge measures,
 the sandbox trains.*
 
+*(Implemented. `objective.py` now measures parameter count, peak VRAM and wall
+clock, and owns `flops_per_token` — which returns `None` rather than a wrong
+number if the model has been restructured past recognition. Training seconds still
+have to come from the loop, since only it knows which steps were compilation, so
+the judge cross-checks that figure against its own wall clock and flags the pair
+as `timing_inconsistent` if they disagree.)*
+
 ---
 
 ## 2. Scaffolding to add first
 
 These aren't goals, they're the plumbing that makes goal-swapping a config change
 instead of a rewrite. Maybe half a day of work total.
+
+*(All three are implemented. What follows is the original sketch; the shipped
+version differs in two ways worth knowing. First, `objective.report()` also owns
+the summary block and the results log, not just scoring — the print at the end of
+`train.py` was itself part of the reporting contract and drifted with every
+rewrite. Second, `results.jsonl` is written by the harness rather than the agent,
+so a run cannot go unrecorded; the agent supplies only the keep/discard verdict via
+`objective.record_decision()`.)*
 
 ### 2.1 `objective.py` — a second read-only file
 
@@ -354,15 +377,15 @@ Ranked by (value ÷ effort), assuming one overnight run each.
 | # | Change | Effort | Risk | Why |
 |---|---|---|---|---|
 | 1 | Seed-noise measurement + keep-margin (§6.1) | 30 min | none | Everything else's results are uninterpretable without it |
-| 2 | Split `forward` from `training_loss` (§1.1) | 30 min | none | Unblocks all of §3; fixes a live footgun |
+| ~~2~~ | ~~Split `forward` from `training_loss` (§1.1)~~ | — | — | **Done** |
 | 3 | Exploration quota in `program.md` (§6.4) | 10 min | low | Zero code, tests the repo's own central claim |
 | 4 | Fixed token budget (§4.1) | 1 hr | low | Changes the character of the search the most per line changed |
-| 5 | Multi-token prediction (§3.1) | 2 hrs | med | Well-precedented, eval stays comparable |
-| 6 | `objective.py` scaffolding (§2.1) | 3 hrs | low | Makes goals a config value; needed for §4-5 |
-| 7 | Latency-aware score (§5.1) | 4 hrs | med | Needs a decode path from scratch, but most practically useful |
+| 5 | Multi-token prediction (§3.1) | 1 hr | med | Well-precedented, eval stays comparable; `training_loss` now exists to hold it |
+| ~~6~~ | ~~`objective.py` scaffolding (§2.1)~~ | — | — | **Done** |
+| 7 | Latency-aware score (§5.1) | 3 hrs | med | Still needs a decode path, but now drops into `SCORERS` |
 | 8 | Sequence-length curriculum (§3.3) | 2 hrs | med | Cheap, no `prepare.py` edit, plausible win under a time budget |
 | 9 | OOD val set (§5.2) | 4 hrs | med | New data plumbing; findings may not be actionable |
-| 10 | Pareto ratchet (§6.2) | 4 hrs | high | Do §6.3 first and see if you actually need this |
+| 10 | Pareto ratchet (§6.2) | 2 hrs | med | The frontier plot exists in `analysis.ipynb`; only the live rule is missing |
 
 ---
 

@@ -19,5 +19,8 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 
-# Results file
+# Results files (per-machine, not shared history)
 results.tsv
+results.jsonl
+run.json
+run.log

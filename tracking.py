@@ -52,7 +52,8 @@ os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "2")
 
 try:
     import mlflow
-    from mlflow.entities import Metric, Param, RunTag
+    from mlflow.entities import Metric, Param
+
     _MLFLOW_IMPORT_ERROR = None
 except Exception as e:  # ImportError, or a broken install
     mlflow = None
@@ -71,7 +72,7 @@ class _State:
         self.enabled = False
         self.run_id = None
         self.client = None
-        self.buffer = []       # list[Metric], flushed after training
+        self.buffer = []  # list[Metric], flushed after training
         self.finished = False
 
 
@@ -91,8 +92,9 @@ def _disable(msg):
 
 def _git(*args, default=""):
     try:
-        out = subprocess.run(["git", "-C", _REPO_DIR, *args],
-                             capture_output=True, text=True, timeout=5)
+        out = subprocess.run(
+            ["git", "-C", _REPO_DIR, *args], capture_output=True, text=True, timeout=5
+        )
         return out.stdout.strip() if out.returncode == 0 else default
     except Exception:
         return default
@@ -112,6 +114,7 @@ def _device_tags():
     tags = {}
     try:
         import torch
+
         tags["torch_version"] = torch.__version__
         if torch.cuda.is_available():
             tags["gpu"] = torch.cuda.get_device_name(0)
@@ -155,6 +158,7 @@ def _preflight(uri, timeout=2.0):
     """
     try:
         from urllib.parse import urlparse
+
         parsed = urlparse(uri)
         if parsed.scheme not in ("http", "https"):
             return True
@@ -201,22 +205,29 @@ def start(params=None, tags=None, note=None, experiment=None, tracking_uri=None)
         mlflow.set_tracking_uri(uri)
         experiment_id = mlflow.set_experiment(exp).experiment_id
         client = mlflow.tracking.MlflowClient()
-        run = client.create_run(experiment_id=experiment_id, run_name=run_name,
-                                tags={k: str(v) for k, v in all_tags.items()})
+        run = client.create_run(
+            experiment_id=experiment_id,
+            run_name=run_name,
+            tags={k: str(v) for k, v in all_tags.items()},
+        )
         _state.client = client
         _state.run_id = run.info.run_id
         _state.enabled = True
     except Exception as e:
         # Unreachable server, auth failure, bad URI — all non-fatal.
-        _warn(f"could not start run at {uri} ({type(e).__name__}: {e}), running untracked")
+        _warn(
+            f"could not start run at {uri} ({type(e).__name__}: {e}), running untracked"
+        )
         _state.enabled = False
         return
 
     if params:
         _log_params(params)
 
-    _warn(f"logging to {uri} | experiment={exp} | run={run_name} "
-          f"({time.time() - t0:.1f}s)")
+    _warn(
+        f"logging to {uri} | experiment={exp} | run={run_name} "
+        f"({time.time() - t0:.1f}s)"
+    )
     atexit.register(_atexit_handler)
 
 
@@ -231,7 +242,9 @@ def _log_params(params):
         entities.append(Param(str(key), text))
     try:
         for i in range(0, len(entities), _PARAM_CHUNK):
-            _state.client.log_batch(_state.run_id, params=entities[i:i + _PARAM_CHUNK])
+            _state.client.log_batch(
+                _state.run_id, params=entities[i : i + _PARAM_CHUNK]
+            )
     except Exception as e:
         _disable(f"log_batch(params) failed ({type(e).__name__}: {e})")
 
@@ -263,7 +276,9 @@ def flush():
     t0 = time.time()
     try:
         for i in range(0, len(buffered), _METRIC_CHUNK):
-            _state.client.log_batch(_state.run_id, metrics=buffered[i:i + _METRIC_CHUNK])
+            _state.client.log_batch(
+                _state.run_id, metrics=buffered[i : i + _METRIC_CHUNK]
+            )
         _warn(f"flushed {len(buffered)} step metrics in {time.time() - t0:.1f}s")
     except Exception as e:
         _disable(f"log_batch(metrics) failed ({type(e).__name__}: {e})")

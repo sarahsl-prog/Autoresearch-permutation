@@ -11,6 +11,7 @@ The idea: give an AI agent a small but real LLM training setup and let it experi
 The repo is deliberately kept small and only really has three files that matter:
 
 - **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
+- **`objective.py`** — the judge: defines the goal, measures the run, computes the score. Not modified by the agent.
 - **`tracking.py`** — MLflow logging for each experiment. Not modified by the agent.
 - **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
 - **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
@@ -53,12 +54,69 @@ The `program.md` file is essentially a super lightweight "skill".
 ## Project structure
 
 ```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-tracking.py     — MLflow experiment logging (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
+prepare.py        — constants, data prep + runtime utilities (do not modify)
+objective.py      — the goal, the meters, the score (do not modify)
+tracking.py       — MLflow experiment logging (do not modify)
+harness_check.py  — static guard on train.py's contract (do not modify)
+check_attention.py— validates the attention backend on a new GPU
+train.py          — model, optimizer, training loop (agent modifies this)
+program.md        — agent instructions
+pyproject.toml    — dependencies
 ```
+
+## The harness contract
+
+`train.py` is rewritten every experiment, and most breakage is loud — the run
+crashes and the ratchet discards it. Three failure modes are silent, because the
+run still trains and still produces a score:
+
+- a dropped `tracking.*` call, so the experiment never reaches MLflow
+- `tracking.log_step` moved inside the timed window, so `training_seconds` and
+  MFU quietly include network latency
+- a training objective placed in `GPT.forward`, which is what `evaluate_bpb`
+  calls — silently changing the number that decides whether that same experiment
+  is kept
+
+`harness_check.py` catches all three by parsing `train.py` — stdlib only, no
+torch, no GPU, a few milliseconds:
+
+```bash
+uv run python harness_check.py
+```
+
+It runs two ways: CI fails on it, and `objective.py` calls it at import so a
+broken edit shows up at the top of `run.log` inside the overnight loop, where CI
+doesn't run. Checks are conservative — anything it can't establish confidently is
+reported as `skipped` rather than failed, since a false alarm would just teach the
+agent to work around the guard.
+
+## Changing the goal
+
+`objective.py` decides what "better" means. Its `GOAL` constant selects a scorer,
+and the agent cannot reach the file:
+
+```python
+GOAL = "min_bpb"              # lowest bits/byte — the original goal
+# GOAL = "min_bpb_under_vram" # same, but anything over VRAM_LIMIT_GB is rejected
+# GOAL = "min_bpb_x_params"   # quality per parameter
+```
+
+The score is printed as `score:`, written to `run.json`, and appended to
+`results.jsonl` along with every other metric. `alternative-goals.md` sketches the
+goals this scaffolding was built for — latency-aware scoring, out-of-distribution
+evaluation, token or FLOP budgets instead of wall clock.
+
+Two structural rules make goal-swapping safe, and they're worth knowing before you
+edit `train.py` by hand:
+
+- **`GPT.forward` is the eval contract.** `evaluate_bpb` calls it and treats the
+  result as plain cross-entropy. New training objectives go in `GPT.training_loss`,
+  which is free to diverge — auxiliary heads, multi-token prediction, z-loss — with
+  no effect on how the run is scored.
+- **The judge owns the meters.** Parameter count, peak VRAM, FLOPs and wall clock
+  are measured in `objective.py`, not reported by the file under test. That barely
+  matters while the goal is `min_bpb`; it matters a great deal for any goal that
+  scores a resource.
 
 ## Experiment tracking
 
@@ -95,6 +153,59 @@ uv run mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///ml
 - **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
 - **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
 - **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+
+## NVIDIA GB10 / DGX Spark (sm_121)
+
+GB10 reports CUDA capability **12.1**, and PyTorch prints:
+
+```
+Found GPU0 NVIDIA GB10 which is of cuda capability 12.1.
+Minimum and Maximum cuda capability supported by this version of PyTorch is (8.0) - (12.0)
+```
+
+**This warning is benign and does not go away.** sm_120 and sm_121 are binary
+compatible, so sm_120 kernels run correctly on GB10; PyTorch's range check simply
+predates 12.1. No official wheel carries native sm_121 cubins — cu128 and cu130
+both stop at sm_120 — so changing index silences nothing.
+
+What does matter on this hardware:
+
+- **Use the cu130 index** (already configured). CUDA 13.0 is the first toolkit
+  whose NVRTC natively knows sm_121, and it publishes the `linux_aarch64` wheels
+  GB10 needs, since it pairs the Blackwell GPU with a Grace ARM CPU.
+- **Flash-Attention 3 is the actual blocker, and not for the reason you'd guess.**
+  It fails at *trace* time, before the GPU is involved:
+
+  ```
+  torch._dynamo.exc.TorchRuntimeError: Dynamo failed to run FX node with fake tensors:
+  call_function _flash_attn3_....fwd(...): got RuntimeError("Cannot access data
+  pointer of Tensor (e.g. FakeTensor, FunctionalTensor).")
+  ```
+
+  The `kernels-community/flash-attn3` build isn't registered as an opaque custom
+  op with a fake/meta implementation, so `torch.compile` traces into the kernel
+  and dies during fake-tensor propagation. Upstream never hits this because
+  `train.py` routes `sm_90` to a different FA3 build; every other GPU gets the
+  community one, which was not exercised under `torch.compile`.
+
+  The fix is `ATTN_BACKEND`, which defaults to `sdpa` off Hopper. This also lines
+  up with NVIDIA's DGX Spark guidance to skip flash-attn entirely — PyTorch SDPA
+  with cuDNN 9.13 is *faster* on GB10 regardless.
+- If you build any custom CUDA yourself, `export TORCH_CUDA_ARCH_LIST="12.1a"`.
+
+Validate the attention backend before spending a training run:
+
+```bash
+uv run python check_attention.py
+```
+
+It checks SDPA and FlexAttention against a naive fp32 reference, then checks that
+both **compile** — which is the part that actually broke.
+
+A community wheel with native sm_121 kernels exists at
+[Qanatpharma/pytorch-sm121-gb10](https://huggingface.co/Qanatpharma/pytorch-sm121-gb10),
+but it is a 2.12 nightly built for **cp312 only**, so it would mean dropping back
+to Python 3.12. Not needed given binary compatibility.
 
 ## Platform support
 

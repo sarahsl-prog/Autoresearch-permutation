@@ -18,15 +18,55 @@ dependencies = [
     "requests>=2.32.0",
     "rustbpe>=0.1.0",
     "tiktoken>=0.11.0",
-    "torch==2.9.1",
+    # CUDA 13.0 build (see [tool.uv.index] below). Not pinned exactly, because
+    # the cu130 index carries a different set of point releases than cu128 did.
+    "torch>=2.9.0",
 ]
+
+[tool.ruff]
+# Check Python source only.
+#   *.md    — ruff reformats python code blocks inside Markdown, which would
+#             rewrite the illustrative sketches in alternative-goals.md into
+#             something that no longer matches the code they describe.
+#   *.ipynb — notebook cells have their own conventions; churn, not signal.
+# Everything else uses ruff's default line length, under which all four .py
+# files already format clean.
+extend-exclude = ["*.md", "*.ipynb"]
+
+[tool.ruff.lint]
+# Deliberately minimal: F and E9 are correctness checks (undefined names, unused
+# imports, syntax errors), not style opinions.
+#
+# Style rules are off on purpose. train.py is rewritten by an autonomous agent
+# ~100 times a night and prepare.py tracks upstream, so a job that failed on
+# blind excepts or dict() literals would either block the research loop or teach
+# the agent to fight the linter instead of doing research. F821 and F401 earn
+# their place because they catch exactly what a bad edit produces — a dangling
+# reference after a rename — before five minutes of training burns on it.
+select = ["F", "E9"]
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu128" },
+    { index = "pytorch-cu130" },
 ]
 
+# CUDA 13.0, not 12.8. Two reasons, both about GB10 / DGX Spark:
+#
+#   - CUDA 13.0 is the first toolkit whose NVRTC natively knows sm_121, so JIT
+#     paths resolve instead of stalling.
+#   - cu130 publishes linux_aarch64 wheels, which GB10 needs — it pairs the
+#     Blackwell GPU with a Grace ARM CPU.
+#
+# Note the "cuda capability 12.1 ... supported (8.0) - (12.0)" warning does NOT
+# go away, and does not need to: sm_120 and sm_121 are binary compatible, so
+# sm_120 kernels run correctly on GB10. PyTorch's range check simply predates
+# 12.1. Nothing on this index carries native sm_121 cubins — cu128 and cu130
+# both stop at sm_120 — so switching indexes silences nothing, it just gives you
+# a CUDA 13 runtime underneath.
+#
+# On x86 with an older NVIDIA GPU this index is still fine; use cu128 if you
+# specifically need it.
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true

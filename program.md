@@ -11,9 +11,10 @@ To set up a new experiment, work with the user to:
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
    - `prepare.py` — fixed constants, data prep, tokenizer, dataloader, evaluation. Do not modify.
+   - `objective.py` — the goal, the meters, the score. Do not modify. **Check which `GOAL` is set** — it determines what you are optimizing.
    - `train.py` — the file you modify. Model architecture, optimizer, training loop.
 4. **Verify data exists**: Check that `~/.cache/autoresearch/` contains data shards and a tokenizer. If not, tell the human to run `uv run prepare.py`.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
+5. **Note the goal**: Report back which `GOAL` is active and what the score therefore means. `results.jsonl` creates itself on the first run — nothing to initialize.
 6. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
@@ -27,16 +28,25 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants (time budget, sequence length, etc).
+- Modify `objective.py`. It is read-only. It defines the goal, measures the run, and computes the score you are trying to lower.
 - Modify `tracking.py`. It is read-only. It logs each experiment to MLflow.
-- Remove the `tracking.*` calls in `train.py`. There are four (`import tracking`, `tracking.start`, `tracking.log_step`, `tracking.log_summary`/`finish`). Rewrite everything around them freely, but carry them through — if you drop them the experiment still runs and still scores, it just vanishes from the record. In particular keep `tracking.log_step` **outside** the `t0`/`t1` timing window; moving it inside would charge network latency to the time budget and corrupt the MFU number.
+- Change what `GPT.forward` returns. `prepare.evaluate_bpb` calls `model(x, y, reduction='none')` and treats the result as plain next-token cross-entropy. It is the scoreboard. Putting a different loss there silently changes the number that decides whether your own experiment gets kept. **New training objectives go in `GPT.training_loss` instead** — see below.
+- Remove the harness calls in `train.py`: `objective.report`, `objective.log_crash`, and the four `tracking.*` calls. Rewrite everything around them freely, but carry them through. Keep `tracking.log_step` **outside** the `t0`/`t1` timing window; moving it inside would charge network latency to the time budget and corrupt the MFU number.
+
+  This is checked. `uv run python harness_check.py` verifies it in a few milliseconds without touching the GPU, and every run prints `[harness] WARNING: ...` at the top of `run.log` if the contract is broken. **If you see one of those warnings, fix it before trusting the run** — the experiment will still train and still produce a score, which is exactly what makes this failure worth guarding. Run the check yourself after any large restructuring of `train.py`.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
-- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
 
-**The goal is simple: get the lowest val_bpb.** Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
+**The goal: get the lowest `score`.** The script prints it; `objective.py` defines it. Under the default goal (`min_bpb`) the score is just `val_bpb`, so this is the same thing as before — but read the `goal:` line rather than assuming, because the human can change it between runs and a different goal may price in memory, model size or other costs.
 
-**VRAM** is a soft constraint. Some increase is acceptable for meaningful val_bpb gains, but it should not blow up dramatically.
+Since the time budget is fixed, you don't need to worry about training time — it's always 5 minutes. The only constraint is that the code runs without crashing and finishes within the budget.
 
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 val_bpb improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 val_bpb improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
+**Two places to change the model, and they mean different things:**
+- `GPT.forward` — the eval contract. Architecture changes belong here (attention, MLP, normalization, embeddings, depth, width). What must not change is that with `targets` supplied it returns plain cross-entropy.
+- `GPT.training_loss` — the training objective, and it is allowed to diverge from `forward`. Auxiliary heads, multi-token prediction, z-loss, label smoothing, distillation, per-position loss weighting: all fair game here, and none of it touches evaluation. `GPT.trunk` gives you the hidden states if you want to hang extra heads off them.
+
+**VRAM** is a soft constraint under the default goal. Some increase is acceptable for meaningful gains, but it should not blow up dramatically. (If the goal is set to `min_bpb_under_vram` it stops being soft — over the limit scores as infinity and is always a discard.)
+
+**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 score improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 score improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
 
 **The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
 
@@ -46,21 +56,29 @@ Once the script finishes it prints a summary like this:
 
 ```
 ---
-val_bpb:          0.997900
-training_seconds: 300.1
-total_seconds:    325.9
-peak_vram_mb:     45060.2
-mfu_percent:      39.80
-total_tokens_M:   499.6
-num_steps:        953
-num_params_M:     50.3
-depth:            8
+goal:               min_bpb
+score:              0.997900
+val_bpb:            0.997900
+training_seconds:   300.1
+total_seconds:      325.9
+peak_vram_mb:       45060.2
+mfu_percent:        39.8
+total_tokens_M:     499.6
+num_steps:          953
+num_params_M:       50.3
+depth:              8
 ```
 
-Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different. You can extract the key metric from the log file:
+Note that the script is configured to always stop after 5 minutes, so depending on the computing platform of this computer the numbers might look different. Extract the key metrics from the log file:
 
 ```
-grep "^val_bpb:" run.log
+grep "^goal:\|^score:\|^val_bpb:\|^peak_vram_mb:" run.log
+```
+
+The same numbers are written to `run.json` in machine-readable form, which is easier if you want more than one metric:
+
+```
+cat run.json
 ```
 
 ## Logging results
@@ -72,30 +90,36 @@ tracking server is unreachable the run prints a one-line warning and continues
 normally — that is not a failure, do not try to fix it, and do not let it change
 your keep/discard decision.
 
-`results.tsv` is still the ratchet's own record, so keep maintaining it:
-log each experiment there (tab-separated, NOT comma-separated — commas break in descriptions).
+`results.jsonl` is the ratchet's own record, and **you do not write it by hand**.
+Every run appends its own line automatically — commit, branch, note, goal, score
+and every metric — with `"status": "pending"`. Crashes caught by the divergence
+guard append themselves too. This means a run can never go unrecorded because you
+forgot.
 
-The TSV has a header row and 5 columns:
-
-```
-commit	val_bpb	memory_gb	status	description
-```
-
-1. git commit hash (short, 7 chars)
-2. val_bpb achieved (e.g. 1.234567) — use 0.000000 for crashes
-3. peak memory in GB, round to .1f (e.g. 12.3 — divide peak_vram_mb by 1024) — use 0.0 for crashes
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
-
-Example:
+The one thing left to you is the verdict. After you decide keep or discard:
 
 ```
-commit	val_bpb	memory_gb	status	description
-a1b2c3d	0.997900	44.0	keep	baseline
-b2c3d4e	0.993200	44.2	keep	increase LR to 0.04
-c3d4e5f	1.005000	44.0	discard	switch to GeLU activation
-d4e5f6g	0.000000	0.0	crash	double model width (OOM)
+uv run python -c "import objective; objective.record_decision('keep')"
 ```
+
+That stamps the most recent entry. Valid values are `keep`, `discard`, `crash`.
+If a run died in a way that left no entry at all (a hard crash before training
+started), record it explicitly:
+
+```
+uv run python -c "import objective; objective.log_crash('OOM at 2x width')"
+```
+
+Each line looks roughly like this — the exact keys vary with the goal, which is
+the point of using JSON rather than fixed columns:
+
+```json
+{"timestamp": "2026-08-04T02:14:07", "commit": "a1b2c3d", "branch": "autoresearch/aug4",
+ "note": "increase LR to 0.04", "status": "keep", "goal": "min_bpb", "score": 0.9932,
+ "val_bpb": 0.9932, "peak_vram_gb": 44.2, "num_params_M": 50.3, "num_steps": 953}
+```
+
+Do not commit `results.jsonl` or `run.json` — both are gitignored.
 
 ## The experiment loop
 
@@ -106,13 +130,13 @@ LOOP FOREVER:
 1. Look at the git state: the current branch/commit we're on
 2. Tune `train.py` with an experimental idea by directly hacking the code.
 3. git commit
-4. Run the experiment, passing the same one-line description you'll put in the TSV so the MLflow run is labelled:
+4. Run the experiment, passing a one-line description so the record is labelled:
    `AUTORESEARCH_NOTE="increase LR to 0.04" uv run train.py > run.log 2>&1`
    (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^peak_vram_mb:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If val_bpb improved (lower), you "advance" the branch, keeping the git commit
+5. Read out the results: `grep "^goal:\|^score:\|^val_bpb:\|^peak_vram_mb:" run.log`
+6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up — and if nothing was appended to `results.jsonl`, call `objective.log_crash(...)` so the failure is still counted.
+7. Record your verdict: `uv run python -c "import objective; objective.record_decision('keep')"` (or `'discard'`)
+8. If the score improved (lower), you "advance" the branch, keeping the git commit
 9. If val_bpb is equal or worse, you git reset back to where you started
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
