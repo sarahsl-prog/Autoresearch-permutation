@@ -35,6 +35,7 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
   This is checked. `uv run python harness_check.py` verifies it in a few milliseconds without touching the GPU, and every run prints `[harness] WARNING: ...` at the top of `run.log` if the contract is broken. **If you see one of those warnings, fix it before trusting the run** — the experiment will still train and still produce a score, which is exactly what makes this failure worth guarding. Run the check yourself after any large restructuring of `train.py`.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
+- Set any environment variable other than `AUTORESEARCH_NOTE`. The harness is configured through env vars (see `.env.example`), and several of them define the experiment rather than participate in it. `AUTORESEARCH_SEED` especially: changing seeds until one scores well is not a research result, it is shopping for a lucky initialisation, and the ratchet cannot tell the difference. `AUTORESEARCH_GOAL`, `AUTORESEARCH_TIME_BUDGET` and `AUTORESEARCH_EVAL_TOKENS` change what a score means, so a run under different values is not comparable to the ones before it.
 
 **The goal: get the lowest `score`.** The script prints it; `objective.py` defines it. Under the default goal (`min_bpb`) the score is just `val_bpb`, so this is the same thing as before — but read the `goal:` line rather than assuming, because the human can change it between runs and a different goal may price in memory, model size or other costs.
 
@@ -141,7 +142,13 @@ LOOP FOREVER:
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
 
-**Timeout**: Each experiment should take ~5 minutes total (+ a few seconds for startup and eval overhead). If a run exceeds 10 minutes, kill it and treat it as a failure (discard and revert).
+**Timeout**: Each experiment should take ~5 minutes total (+ startup, compile and eval overhead). Rather than watching the clock, put the limit in the command so a pathological config cannot eat the night:
+
+```
+AUTORESEARCH_NOTE="..." timeout 900 uv run train.py > run.log 2>&1
+```
+
+A run killed by `timeout` exits 124 and writes no summary. Treat it as a failure: record it with `objective.log_crash('timed out')` and revert. This matters more than it looks — the time budget only starts counting after 10 warmup steps, so a config whose individual steps are enormously slow can run far past 5 minutes without ever tripping the budget.
 
 **Crashes**: If a run crashes (OOM, or a bug, or etc.), use your judgment: If it's something dumb and easy to fix (e.g. a typo, a missing import), fix it and re-run. If the idea itself is fundamentally broken, just skip it, log "crash" as the status in the tsv, and move on.
 

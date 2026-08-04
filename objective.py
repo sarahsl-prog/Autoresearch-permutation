@@ -32,13 +32,24 @@ import subprocess
 import torch
 
 import harness_check
-from prepare import evaluate_bpb
+from prepare import EVAL_TOKENS, TIME_BUDGET, evaluate_bpb
 
 _REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _IMPORT_TIME = time.time()
 
-RESULTS_PATH = os.path.join(_REPO_DIR, "results.jsonl")
-RUN_JSON_PATH = os.path.join(_REPO_DIR, "run.json")
+RESULTS_PATH = os.environ.get("AUTORESEARCH_RESULTS_PATH") or os.path.join(
+    _REPO_DIR, "results.jsonl"
+)
+RUN_JSON_PATH = os.environ.get("AUTORESEARCH_RUN_JSON") or os.path.join(
+    _REPO_DIR, "run.json"
+)
+
+# The random seed lives here, not in train.py, because the agent must not be able
+# to reach it. A seed is not a hyperparameter — an agent free to change it can
+# lower its score by shopping for a lucky initialisation, which the ratchet would
+# happily keep. Set AUTORESEARCH_SEED to repeat a config across seeds and measure
+# how much of a "win" is noise (alternative-goals.md §6.1).
+SEED = int(os.environ.get("AUTORESEARCH_SEED", "42"))
 
 # Warn — never fail — if train.py has drifted from its contract with the harness.
 # CI is the hard gate, but CI does not run on autoresearch/* branches, so this is
@@ -50,9 +61,11 @@ harness_check.warn()
 # The goal
 # ---------------------------------------------------------------------------
 
-GOAL = "min_bpb"  # <- the only line a human edits
+GOAL = os.environ.get("AUTORESEARCH_GOAL", "min_bpb")
 
-VRAM_LIMIT_GB = 20.0  # used by min_bpb_under_vram
+# Used by min_bpb_under_vram. The default is a placeholder — set it from the card
+# you actually have, not from this number.
+VRAM_LIMIT_GB = float(os.environ.get("AUTORESEARCH_VRAM_LIMIT_GB", "20.0"))
 
 
 def _min_bpb(m):
@@ -289,6 +302,11 @@ def report(model, tokenizer, batch_size, stats):
 
     metrics["score"] = score(metrics)
     metrics["goal"] = GOAL
+    # Recorded so a run scored under different harness settings is identifiable
+    # later rather than silently mixed in with the rest.
+    metrics["seed"] = SEED
+    metrics["time_budget"] = TIME_BUDGET
+    metrics["eval_tokens"] = EVAL_TOKENS
 
     _print_summary(metrics)
     _write_run_json(metrics)
@@ -338,6 +356,7 @@ def _append_result(metrics):
         "branch": _git("rev-parse", "--abbrev-ref", "HEAD", default="unknown"),
         "note": os.environ.get("AUTORESEARCH_NOTE", ""),
         "status": "pending",
+        "seed": SEED,  # so repeated-seed runs can be grouped in analysis
         **{k: v for k, v in metrics.items()},
     }
     try:
