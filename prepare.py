@@ -27,9 +27,15 @@ import torch
 # Constants (fixed, do not modify)
 # ---------------------------------------------------------------------------
 
+# Fixed as far as the agent is concerned. The two env overrides exist for the
+# human running the harness, and both change what a score MEANS, so changing them
+# mid-campaign makes runs incomparable. Both are recorded with every run, so a
+# mismatch is at least visible after the fact.
 MAX_SEQ_LEN = 2048       # context length
-TIME_BUDGET = 300        # training time budget in seconds (5 minutes)
-EVAL_TOKENS = 40 * 524288  # number of tokens for val eval
+TIME_BUDGET = int(os.environ.get("AUTORESEARCH_TIME_BUDGET", "300"))
+# Tokens used for the validation metric. Lower = more experiments per night, but
+# a noisier score, which raises the bar for calling an improvement real.
+EVAL_TOKENS = int(os.environ.get("AUTORESEARCH_EVAL_TOKENS", 40 * 524288))
 
 # ---------------------------------------------------------------------------
 # Configuration

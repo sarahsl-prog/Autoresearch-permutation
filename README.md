@@ -90,6 +90,36 @@ doesn't run. Checks are conservative — anything it can't establish confidently
 reported as `skipped` rather than failed, since a false alarm would just teach the
 agent to work around the guard.
 
+## Configuration
+
+Everything configurable is an environment variable, listed with defaults and
+rationale in [`.env.example`](.env.example). Copy it and point uv at the result:
+
+```bash
+cp .env.example .env
+export UV_ENV_FILE=.env      # once per shell; uv then loads it for every `uv run`
+```
+
+Three of them decide what a score *means*, so set them before a campaign starts
+rather than during one — `AUTORESEARCH_GOAL`, `AUTORESEARCH_TIME_BUDGET`, and
+`AUTORESEARCH_EVAL_TOKENS`. All three are recorded with every run, so a mid-flight
+change is at least visible in `results.jsonl` afterwards.
+
+`AUTORESEARCH_SEED` deserves its own note. It lives in `objective.py`, out of the
+agent's reach, because an agent free to change the seed can lower its score by
+shopping for a lucky initialisation — and a greedy ratchet would keep the result.
+Vary it yourself to find out how large a `val_bpb` change has to be before it
+means anything:
+
+```bash
+for s in 41 42 43 44 45; do
+  AUTORESEARCH_SEED=$s AUTORESEARCH_NOTE="seed $s" uv run train.py > run.log 2>&1
+done
+```
+
+The spread across those five is your noise floor. Improvements smaller than it
+are not improvements.
+
 ## Changing the goal
 
 `objective.py` decides what "better" means. Its `GOAL` constant selects a scorer,
