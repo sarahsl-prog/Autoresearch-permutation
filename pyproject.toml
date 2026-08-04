@@ -23,9 +23,11 @@ dependencies = [
     "requests>=2.32.0",
     "rustbpe>=0.1.0",
     "tiktoken>=0.11.0",
-    # CUDA 13.0 build (see [tool.uv.index] below). Not pinned exactly, because
-    # the cu130 index carries a different set of point releases than cu128 did.
-    "torch>=2.9.0",
+    # CUDA 13.0 build (see [tool.uv.index] below). Pinned exactly: an open range
+    # let uv re-resolve on every `uv run`, swapping packages in and out of the
+    # venv — including, once, whichever one provides libcudnn.so.9, which breaks
+    # `import torch` outright. 2.13.0 is the version verified working on GB10.
+    "torch==2.13.0",
 ]
 
 [tool.ruff]
