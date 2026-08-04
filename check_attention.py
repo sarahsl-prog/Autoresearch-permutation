@@ -134,24 +134,39 @@ except Exception as e:
     ok = False
     print(f"  FAIL  sliding window compiled: {type(e).__name__}: {e}")
 
-print("\n== throughput at train.py's shapes ==")
+# train.py's "S" layers use window = sequence_len // 2, not the small WINDOW used
+# for the correctness checks above. Timing with a 64-token window would flatter
+# the banded path enormously and tell you nothing about the real run.
+TRAIN_T, TRAIN_WINDOW, TRAIN_H, TRAIN_D = 2048, 1024, 4, 128
+BENCH_B = 8  # train.py uses DEVICE_BATCH_SIZE=128; scale accordingly
+
+print(f"\n== throughput (T={TRAIN_T}, window={TRAIN_WINDOW}, B={BENCH_B}) ==")
+
+
+def train_sliding(b, h, q_idx, kv_idx):
+    return (q_idx >= kv_idx) & (q_idx - kv_idx <= TRAIN_WINDOW)
+
+
 try:
     qb, kb, vb = (
-        torch.randn(8, 2048, 4, 128, device=DEV, dtype=torch.bfloat16) for _ in range(3)
+        torch.randn(
+            BENCH_B, TRAIN_T, TRAIN_H, TRAIN_D, device=DEV, dtype=torch.bfloat16
+        )
+        for _ in range(3)
     )
     big_mask = create_block_mask(
-        sliding_causal, B=None, H=None, Q_LEN=2048, KV_LEN=2048, device=DEV
+        train_sliding, B=None, H=None, Q_LEN=TRAIN_T, KV_LEN=TRAIN_T, device=DEV
     )
-    for label, m in (("full causal", None), ("sliding window", big_mask)):
-        compiled(qb, kb, vb, m, 4, 4)
+    for label, m in (("full causal (L)", None), ("sliding window (S)", big_mask)):
+        compiled(qb, kb, vb, m, TRAIN_H, TRAIN_H)
         torch.cuda.synchronize()
         t0 = time.time()
         for _ in range(10):
-            compiled(qb, kb, vb, m, 4, 4)
+            compiled(qb, kb, vb, m, TRAIN_H, TRAIN_H)
         torch.cuda.synchronize()
-        print(
-            f"  {label:16s} {(time.time() - t0) / 10 * 1000:6.1f} ms/iter (B=8, T=2048)"
-        )
+        per_iter = (time.time() - t0) / 10 * 1000
+        print(f"  {label:20s} {per_iter:6.2f} ms/iter")
+    print(f"  (one attention call; train.py runs {8} layers per fwd pass)")
 except Exception as e:
     print(f"  skipped ({type(e).__name__}: {e})")
 
