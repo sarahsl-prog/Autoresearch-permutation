@@ -511,13 +511,25 @@ class MuonAdamW(torch.optim.Optimizer):
 # Hyperparameters (edit these directly, no CLI flags needed)
 # ---------------------------------------------------------------------------
 
+# Defaults retuned for this machine (NVIDIA GB10). Upstream's values assume an
+# H100 and gave 90 steps here, against schedules written for ~950: WARMDOWN_RATIO
+# starts decaying LR at the halfway step, and get_muon_momentum ramps over the
+# first 300 steps, so the momentum ramp never even completed. Upstream values are
+# noted per line if you move this to a bigger GPU.
+
 # Model architecture
 ASPECT_RATIO = 64       # model_dim = depth * ASPECT_RATIO
 HEAD_DIM = 128          # target head dimension for attention
-WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
+WINDOW_PATTERN = "L"    # was "SSSL". L=full, S=half context. All-L keeps the SDPA
+                        # backend on its is_causal fast path and never builds a
+                        # FlexAttention BlockMask.
 
 # Optimization
-TOTAL_BATCH_SIZE = 2**19 # ~524K tokens per optimizer step
+TOTAL_BATCH_SIZE = 2**18 # ~262K tokens/step (was 2**19). Chosen so steps land
+                         # near the ~950 the schedules assume: at the measured
+                         # 136K tok/s scaled for the smaller model, this is
+                         # roughly 600-1250 steps. Only a 2x cut, so the tuned
+                         # LRs below are barely disturbed.
 EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
 UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
 MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
@@ -529,8 +541,13 @@ WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
-DEPTH = 8               # number of transformer layers
-DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+DEPTH = 4               # was 8. -> n_embd 256, 2 heads, ~11.5M params. At 50M
+                        # params the previous run saw only 41M tokens, i.e. less
+                        # than one token per parameter; ~20 tokens/param is the
+                        # compute-optimal neighbourhood, and 11.5M sits there for
+                        # the token counts this budget now reaches.
+DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM). Unchanged, so
+                         # grad_accum_steps is now 1 rather than 2.
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -542,7 +559,9 @@ torch.cuda.manual_seed(42)
 torch.set_float32_matmul_precision("high")
 device = torch.device("cuda")
 autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
-H100_BF16_PEAK_FLOPS = 989.5e12
+# Measured for this GPU rather than hardcoded to an H100 — see objective.py.
+# A device property is a meter, so the judge owns it.
+PEAK_FLOPS = objective.device_peak_flops()
 
 tokenizer = Tokenizer.from_directory()
 vocab_size = tokenizer.get_vocab_size()
@@ -684,7 +703,7 @@ while True:
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1))
     pct_done = 100 * progress
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
-    mfu = (100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+    mfu = (100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / PEAK_FLOPS
            if num_flops_per_token else 0.0)
     remaining = max(0, TIME_BUDGET - total_training_time)
 
@@ -722,7 +741,7 @@ print()  # newline after \r training log
 total_tokens = step * TOTAL_BATCH_SIZE
 
 steady_state_mfu = (100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10)
-                    / total_training_time / H100_BF16_PEAK_FLOPS
+                    / total_training_time / PEAK_FLOPS
                     if total_training_time > 0 and num_flops_per_token else 0)
 
 # Evaluation, scoring, the summary block, run.json and results.jsonl all happen

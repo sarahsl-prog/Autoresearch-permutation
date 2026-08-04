@@ -111,6 +111,64 @@ def count_params(model):
     return sum(p.numel() for p in model.parameters())
 
 
+_PEAK_FLOPS = None
+
+
+def device_peak_flops(dtype=None):
+    """
+    Achievable dense bf16 throughput for THIS GPU, in FLOP/s — the denominator
+    for MFU.
+
+    Measured rather than looked up. A hardcoded H100 constant makes MFU
+    meaningless on anything else (GB10 reports ~3% while doing perfectly
+    reasonable work), and a table of vendor peak numbers goes stale every time
+    new silicon appears. A big square matmul is a fair ceiling: it is what the
+    hardware does when nothing is in its way.
+
+    Override with AUTORESEARCH_PEAK_FLOPS if you want vendor peak instead.
+    Cached — the measurement runs once per process, during startup, which is
+    outside the training budget.
+    """
+    global _PEAK_FLOPS
+    if _PEAK_FLOPS is not None:
+        return _PEAK_FLOPS
+
+    override = os.environ.get("AUTORESEARCH_PEAK_FLOPS")
+    if override:
+        _PEAK_FLOPS = float(override)
+        return _PEAK_FLOPS
+
+    fallback = 989.5e12  # H100 bf16, the historical constant
+    if not torch.cuda.is_available():
+        _PEAK_FLOPS = fallback
+        return _PEAK_FLOPS
+    try:
+        dtype = dtype or torch.bfloat16  # resolved here, not as a default arg
+        n, iters = 8192, 20
+        a = torch.randn(n, n, device="cuda", dtype=dtype)
+        b = torch.randn(n, n, device="cuda", dtype=dtype)
+        for _ in range(3):  # warm up
+            a @ b
+        torch.cuda.synchronize()
+        t0 = time.time()
+        for _ in range(iters):
+            a @ b
+        torch.cuda.synchronize()
+        elapsed = time.time() - t0
+        _PEAK_FLOPS = 2 * n**3 * iters / elapsed
+        del a, b
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()  # don't charge the probe to the run
+        print(f"Measured peak bf16 throughput: {_PEAK_FLOPS / 1e12:.1f} TFLOP/s")
+    except Exception as e:
+        print(
+            f"[objective] peak FLOPS probe failed ({type(e).__name__}: {e}); "
+            f"falling back to the H100 constant, so MFU will be wrong"
+        )
+        _PEAK_FLOPS = fallback
+    return _PEAK_FLOPS
+
+
 def peak_vram_mb():
     if not torch.cuda.is_available():
         return None

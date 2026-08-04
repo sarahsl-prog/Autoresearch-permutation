@@ -192,6 +192,27 @@ What does matter on this hardware:
   up with NVIDIA's DGX Spark guidance to skip flash-attn entirely — PyTorch SDPA
   with cuDNN 9.13 is *faster* on GB10 regardless.
 - If you build any custom CUDA yourself, `export TORCH_CUDA_ARCH_LIST="12.1a"`.
+- **Let `uv` own the venv.** If `uv run` prints `Uninstalled 1 package / Installed
+  1 package` on every invocation, the environment is being re-resolved each time
+  and something will eventually break — most visibly as
+  `ImportError: libcudnn.so.9: cannot open shared object file`, because the
+  package providing it got swapped out. That happens when `uv.lock` is out of
+  date with `pyproject.toml`, or when torch was installed by hand with
+  `uv pip install` alongside the project's own resolution. Rebuild cleanly:
+
+  ```bash
+  rm -rf .venv uv.lock
+  uv sync                      # regenerates the lock, installs exactly it
+  uv run python -c "import torch; print(torch.__version__)"
+  ```
+
+  Commit the regenerated `uv.lock` so the environment stops moving.
+- **The hyperparameter defaults in `train.py` are retuned for this machine.**
+  Upstream's values assume an H100 and produced 90 steps here, against schedules
+  written for ~950 — `WARMDOWN_RATIO` began decaying the LR at step 45 and
+  `get_muon_momentum` never finished its 300-step ramp. `DEPTH`,
+  `TOTAL_BATCH_SIZE` and `WINDOW_PATTERN` are changed, with upstream's values
+  noted per line. Restore them if you move to a bigger GPU.
 
 Validate the attention backend before spending a training run:
 

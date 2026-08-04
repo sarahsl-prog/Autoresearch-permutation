@@ -12,15 +12,22 @@ dependencies = [
     "kernels>=0.11.7",
     "matplotlib>=3.10.8",
     "mlflow>=3.0",
+    # MLflow resolves the artifact store client lazily, so an S3/MinIO-backed
+    # tracking server fails only at log_artifact time with "No module named
+    # 'boto3'" — after the run has already trained. Harmless if your server uses
+    # local artifact storage.
+    "boto3>=1.34",
     "numpy>=2.2.6",
     "pandas>=2.3.3",
     "pyarrow>=21.0.0",
     "requests>=2.32.0",
     "rustbpe>=0.1.0",
     "tiktoken>=0.11.0",
-    # CUDA 13.0 build (see [tool.uv.index] below). Not pinned exactly, because
-    # the cu130 index carries a different set of point releases than cu128 did.
-    "torch>=2.9.0",
+    # CUDA 13.0 build (see [tool.uv.index] below). Pinned exactly: an open range
+    # let uv re-resolve on every `uv run`, swapping packages in and out of the
+    # venv — including, once, whichever one provides libcudnn.so.9, which breaks
+    # `import torch` outright. 2.13.0 is the version verified working on GB10.
+    "torch==2.13.0",
 ]
 
 [tool.ruff]
