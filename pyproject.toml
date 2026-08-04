@@ -12,6 +12,11 @@ dependencies = [
     "kernels>=0.11.7",
     "matplotlib>=3.10.8",
     "mlflow>=3.0",
+    # MLflow resolves the artifact store client lazily, so an S3/MinIO-backed
+    # tracking server fails only at log_artifact time with "No module named
+    # 'boto3'" — after the run has already trained. Harmless if your server uses
+    # local artifact storage.
+    "boto3>=1.34",
     "numpy>=2.2.6",
     "pandas>=2.3.3",
     "pyarrow>=21.0.0",
