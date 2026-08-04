@@ -58,6 +58,7 @@ prepare.py        — constants, data prep + runtime utilities (do not modify)
 objective.py      — the goal, the meters, the score (do not modify)
 tracking.py       — MLflow experiment logging (do not modify)
 harness_check.py  — static guard on train.py's contract (do not modify)
+check_attention.py— validates the attention backend on a new GPU
 train.py          — model, optimizer, training loop (agent modifies this)
 program.md        — agent instructions
 pyproject.toml    — dependencies
@@ -172,11 +173,34 @@ What does matter on this hardware:
 - **Use the cu130 index** (already configured). CUDA 13.0 is the first toolkit
   whose NVRTC natively knows sm_121, and it publishes the `linux_aarch64` wheels
   GB10 needs, since it pairs the Blackwell GPU with a Grace ARM CPU.
-- **Flash-Attention 3 is the real blocker.** `train.py` fetches a prebuilt FA3
-  kernel, and those ship precompiled cubins with no sm_121 target and no PTX to
-  JIT from. NVIDIA's own DGX Spark guidance is to skip flash-attn entirely and
-  use PyTorch SDPA, which with cuDNN 9.13 is *faster* on GB10 anyway.
+- **Flash-Attention 3 is the actual blocker, and not for the reason you'd guess.**
+  It fails at *trace* time, before the GPU is involved:
+
+  ```
+  torch._dynamo.exc.TorchRuntimeError: Dynamo failed to run FX node with fake tensors:
+  call_function _flash_attn3_....fwd(...): got RuntimeError("Cannot access data
+  pointer of Tensor (e.g. FakeTensor, FunctionalTensor).")
+  ```
+
+  The `kernels-community/flash-attn3` build isn't registered as an opaque custom
+  op with a fake/meta implementation, so `torch.compile` traces into the kernel
+  and dies during fake-tensor propagation. Upstream never hits this because
+  `train.py` routes `sm_90` to a different FA3 build; every other GPU gets the
+  community one, which was not exercised under `torch.compile`.
+
+  The fix is `ATTN_BACKEND`, which defaults to `sdpa` off Hopper. This also lines
+  up with NVIDIA's DGX Spark guidance to skip flash-attn entirely — PyTorch SDPA
+  with cuDNN 9.13 is *faster* on GB10 regardless.
 - If you build any custom CUDA yourself, `export TORCH_CUDA_ARCH_LIST="12.1a"`.
+
+Validate the attention backend before spending a training run:
+
+```bash
+uv run python check_attention.py
+```
+
+It checks SDPA and FlexAttention against a naive fp32 reference, then checks that
+both **compile** — which is the part that actually broke.
 
 A community wheel with native sm_121 kernels exists at
 [Qanatpharma/pytorch-sm121-gb10](https://huggingface.co/Qanatpharma/pytorch-sm121-gb10),

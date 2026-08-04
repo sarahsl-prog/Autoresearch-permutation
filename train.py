@@ -17,11 +17,29 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from kernels import get_kernel
+# Attention backend: "auto" | "fa3" | "sdpa". Override with ATTN_BACKEND=sdpa.
+#
+# FA3 is the fast path on Hopper. Off Hopper it is a liability: the
+# kernels-community build is not registered as an opaque custom op, so
+# torch.compile traces into it and dies during fake-tensor propagation with
+# "Cannot access data pointer of Tensor". Its cubins also carry no sm_121 target
+# for Blackwell GB10. PyTorch's own attention compiles cleanly, and per NVIDIA's
+# DGX Spark guidance is faster than flash-attn on that hardware anyway.
+ATTN_BACKEND = os.environ.get("ATTN_BACKEND", "auto")
 cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
+if ATTN_BACKEND == "auto":
+    ATTN_BACKEND = "fa3" if cap == (9, 0) else "sdpa"
+assert ATTN_BACKEND in ("fa3", "sdpa"), f"unknown ATTN_BACKEND {ATTN_BACKEND!r}"
+
+fa3 = None
+if ATTN_BACKEND == "fa3":
+    from kernels import get_kernel
+    # varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
+    repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
+    fa3 = get_kernel(repo).flash_attn_interface
+else:
+    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+print(f"Attention backend: {ATTN_BACKEND} (device capability {cap[0]}.{cap[1]})")
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader
 import objective  # harness-owned: defines the goal, measures, and reports
@@ -51,6 +69,28 @@ def has_ve(layer_idx, n_layer):
     return layer_idx % 2 == (n_layer - 1) % 2
 
 
+def sdpa_attention(q, k, v, block_mask, n_head, n_kv_head):
+    """
+    PyTorch-native replacement for the FA3 call. Takes and returns FA3's
+    (B, T, H, D) layout so the call site is a drop-in swap.
+
+    block_mask is None for a full-context layer, which takes SDPA's is_causal
+    fast path. Banded layers go through FlexAttention, which encodes the window
+    as a BlockMask and skips whole blocks — an explicit (T, T) attn_mask would be
+    broadcast to (B, H, T, T) internally and blow up memory at this batch size.
+    """
+    q, k, v = (t.transpose(1, 2) for t in (q, k, v))  # -> (B, H, T, D)
+    if n_kv_head != n_head:  # GQA: expand kv heads rather than rely on enable_gqa
+        repeat = n_head // n_kv_head
+        k = k.repeat_interleave(repeat, dim=1)
+        v = v.repeat_interleave(repeat, dim=1)
+    if block_mask is None:
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+    else:
+        y = flex_attention(q, k, v, block_mask=block_mask)
+    return y.transpose(1, 2)  # -> (B, T, H, D)
+
+
 def apply_rotary_emb(x, cos, sin):
     assert x.ndim == 4
     d = x.shape[3] // 2
@@ -76,7 +116,7 @@ class CausalSelfAttention(nn.Module):
         self.ve_gate_channels = 32
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
 
-    def forward(self, x, ve, cos_sin, window_size):
+    def forward(self, x, ve, cos_sin, window_size, block_mask=None):
         B, T, C = x.size()
         q = self.c_q(x).view(B, T, self.n_head, self.head_dim)
         k = self.c_k(x).view(B, T, self.n_kv_head, self.head_dim)
@@ -92,7 +132,10 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        if fa3 is not None:
+            y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
+        else:
+            y = sdpa_attention(q, k, v, block_mask, self.n_head, self.n_kv_head)
         y = y.contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
@@ -117,8 +160,8 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config, layer_idx)
         self.mlp = MLP(config)
 
-    def forward(self, x, ve, cos_sin, window_size):
-        x = x + self.attn(norm(x), ve, cos_sin, window_size)
+    def forward(self, x, ve, cos_sin, window_size, block_mask=None):
+        x = x + self.attn(norm(x), ve, cos_sin, window_size, block_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -128,6 +171,8 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         self.window_sizes = self._compute_window_sizes(config)
+        # Populated by init_weights (SDPA backend only); None means full causal.
+        self.block_masks = [None] * config.n_layer
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
             "h": nn.ModuleList([Block(config, i) for i in range(config.n_layer)]),
@@ -181,6 +226,30 @@ class GPT(nn.Module):
         self.transformer.wte.to(dtype=torch.bfloat16)
         for ve in self.value_embeds.values():
             ve.to(dtype=torch.bfloat16)
+        # Attention masks. Built here rather than in __init__ for the same reason
+        # cos/sin are recomputed above: the model is constructed on meta and
+        # to_empty() leaves buffer contents undefined.
+        if fa3 is None:
+            self.block_masks = self._build_block_masks()
+
+    def _build_block_masks(self):
+        """One BlockMask per layer for the SDPA backend; None where full causal."""
+        seq_len = self.config.sequence_len
+        device = self.transformer.wte.weight.device
+        masks, cache = [], {}
+        for window, _ in self.window_sizes:
+            if window >= seq_len:
+                masks.append(None)  # plain causal — SDPA's is_causal path
+                continue
+            if window not in cache:
+                def sliding_causal(b, h, q_idx, kv_idx, w=window):
+                    return (q_idx >= kv_idx) & (q_idx - kv_idx <= w)
+                cache[window] = create_block_mask(
+                    sliding_causal, B=None, H=None,
+                    Q_LEN=seq_len, KV_LEN=seq_len, device=device,
+                )
+            masks.append(cache[window])
+        return masks
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
         if device is None:
@@ -267,7 +336,7 @@ class GPT(nn.Module):
         for i, block in enumerate(self.transformer.h):
             x = self.resid_lambdas[i] * x + self.x0_lambdas[i] * x0
             ve = self.value_embeds[str(i)](idx) if str(i) in self.value_embeds else None
-            x = block(x, ve, cos_sin, self.window_sizes[i])
+            x = block(x, ve, cos_sin, self.window_sizes[i], self.block_masks[i])
         return norm(x)
 
     def logits_from(self, x):
