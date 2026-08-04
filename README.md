@@ -131,6 +131,17 @@ export MLFLOW_EXPERIMENT_NAME=autoresearch         # experiment to log under
 AUTORESEARCH_NOTE="increase LR to 0.04" uv run train.py
 ```
 
+If your tracking server keeps artifacts in S3 or MinIO, give it credentials, or
+every run drops its `train.py` artifact with `NoCredentialsError`:
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export MLFLOW_S3_ENDPOINT_URL=http://your-minio:9000   # MinIO only
+```
+
+Metrics and parameters are unaffected — they go to the tracking server directly.
+
 Tracking is best-effort by design. If the server is unreachable, `train.py` prints
 one warning and trains normally — an overnight loop should never lose experiments
 because a logging host went down. Two properties worth knowing:
