@@ -541,7 +541,7 @@ WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
-DEPTH = 4               # was 8. -> n_embd 256, 2 heads, ~11.5M params. At 50M
+DEPTH = 3               # was 8. -> n_embd 256, 2 heads, ~11.5M params. At 50M
                         # params the previous run saw only 41M tokens, i.e. less
                         # than one token per parameter; ~20 tokens/param is the
                         # compute-optimal neighbourhood, and 11.5M sits there for
