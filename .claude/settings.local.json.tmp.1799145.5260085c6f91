@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv)",
+      "Read(//home/sunds/.local/share/uv/python/cpython-3.13.14-linux-aarch64-gnu/bin/**)",
+      "Bash(uv run *)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(uv sync *)",
+      "Bash(AUTORESEARCH_SEED=41 AUTORESEARCH_NOTE=\"A1 seed 41\" timeout 900 uv run train.py)",
+      "Bash(AUTORESEARCH_SEED=42 AUTORESEARCH_NOTE=\"A1 seed 42\" timeout 900 uv run train.py)",
+      "Bash(AUTORESEARCH_SEED=43 AUTORESEARCH_NOTE=\"A1 seed 43\" timeout 900 uv run train.py)",
+      "Bash(AUTORESEARCH_SEED=44 AUTORESEARCH_NOTE=\"A1 seed 44\" timeout 900 uv run train.py)",
+      "Bash(AUTORESEARCH_SEED=45 AUTORESEARCH_NOTE=\"A1 seed 45\" timeout 900 uv run train.py)",
+      "Bash(python3 *)",
+      "Bash(nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv)",
+      "Bash(echo \"---exit code: $?\")",
+      "Bash(AUTORESEARCH_NOTE=\"A3 determinism 1\" timeout 900 uv run train.py)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(AUTORESEARCH_NOTE=\"A3 determinism 2\" timeout 900 uv run train.py)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  }
+}
