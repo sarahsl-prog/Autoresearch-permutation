@@ -1,4 +1,4 @@
-# Experiment catalogue
+# Experiment catalogue - Claude Opus
 
 Fifty-three experiments across seven categories, sized for this machine and this
 baseline. Written to be run by hand, but every entry is also a fair prompt for the
