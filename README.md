@@ -131,8 +131,8 @@ GOAL = "min_bpb"              # lowest bits/byte — the original goal
 # GOAL = "min_bpb_x_params"   # quality per parameter
 ```
 
-The score is printed as `score:`, written to `run.json`, and appended to
-`results.jsonl` along with every other metric. `alternative-goals.md` sketches the
+The score is printed as `score:`, written to a dated `run-<timestamp>.json`, and
+appended to `results.jsonl` along with every other metric. `alternative-goals.md` sketches the
 goals this scaffolding was built for — latency-aware scoring, out-of-distribution
 evaluation, token or FLOP budgets instead of wall clock.
 

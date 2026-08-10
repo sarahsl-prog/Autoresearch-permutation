@@ -40,9 +40,17 @@ _IMPORT_TIME = time.time()
 RESULTS_PATH = os.environ.get("AUTORESEARCH_RESULTS_PATH") or os.path.join(
     _REPO_DIR, "results.jsonl"
 )
-RUN_JSON_PATH = os.environ.get("AUTORESEARCH_RUN_JSON") or os.path.join(
-    _REPO_DIR, "run.json"
-)
+# run.json is a single-run snapshot, not the ratchet's record, so it gets a
+# fresh dated name each run rather than being overwritten by the next one.
+# An explicit AUTORESEARCH_RUN_JSON is honored as a literal path, undated.
+_RUN_JSON_OVERRIDE = os.environ.get("AUTORESEARCH_RUN_JSON")
+
+
+def _run_json_path(timestamp):
+    if _RUN_JSON_OVERRIDE:
+        return _RUN_JSON_OVERRIDE
+    stamp = timestamp.replace("-", "").replace(":", "").replace("T", "-")
+    return os.path.join(_REPO_DIR, f"run-{stamp}.json")
 
 # The random seed lives here, not in train.py, because the agent must not be able
 # to reach it. A seed is not a hyperparameter — an agent free to change it can
@@ -307,6 +315,10 @@ def report(model, tokenizer, batch_size, stats):
     metrics["seed"] = SEED
     metrics["time_budget"] = TIME_BUDGET
     metrics["eval_tokens"] = EVAL_TOKENS
+    # Computed once and reused by both writes below, so run.json and the
+    # results.jsonl line for the same run always agree on when it happened.
+    metrics["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    metrics["testing_plan"] = os.environ.get("AUTORESEARCH_TESTING_PLAN", "")
 
     _print_summary(metrics)
     _write_run_json(metrics)
@@ -337,11 +349,12 @@ def _print_summary(metrics):
 
 
 def _write_run_json(metrics):
+    path = _run_json_path(metrics["timestamp"])
     try:
-        with open(RUN_JSON_PATH, "w") as f:
+        with open(path, "w") as f:
             json.dump(metrics, f, indent=2, default=str)
     except OSError as e:
-        print(f"[objective] could not write run.json ({e})")
+        print(f"[objective] could not write {path} ({e})")
 
 
 def _append_result(metrics):
@@ -351,7 +364,6 @@ def _append_result(metrics):
     afterwards by record_decision().
     """
     record = {
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "commit": _git("rev-parse", "--short=7", "HEAD", default="unknown"),
         "branch": _git("rev-parse", "--abbrev-ref", "HEAD", default="unknown"),
         "note": os.environ.get("AUTORESEARCH_NOTE", ""),
@@ -407,6 +419,7 @@ def log_crash(note=None):
         "commit": _git("rev-parse", "--short=7", "HEAD", default="unknown"),
         "branch": _git("rev-parse", "--abbrev-ref", "HEAD", default="unknown"),
         "note": note if note is not None else os.environ.get("AUTORESEARCH_NOTE", ""),
+        "testing_plan": os.environ.get("AUTORESEARCH_TESTING_PLAN", ""),
         "status": "crash",
         "goal": GOAL,
         "score": None,

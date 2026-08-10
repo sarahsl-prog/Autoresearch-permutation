@@ -35,7 +35,7 @@ Each experiment runs on a single GPU. The training script runs for a **fixed tim
 
   This is checked. `uv run python harness_check.py` verifies it in a few milliseconds without touching the GPU, and every run prints `[harness] WARNING: ...` at the top of `run.log` if the contract is broken. **If you see one of those warnings, fix it before trusting the run** — the experiment will still train and still produce a score, which is exactly what makes this failure worth guarding. Run the check yourself after any large restructuring of `train.py`.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
-- Set any environment variable other than `AUTORESEARCH_NOTE`. The harness is configured through env vars (see `.env.example`), and several of them define the experiment rather than participate in it. `AUTORESEARCH_SEED` especially: changing seeds until one scores well is not a research result, it is shopping for a lucky initialisation, and the ratchet cannot tell the difference. `AUTORESEARCH_GOAL`, `AUTORESEARCH_TIME_BUDGET` and `AUTORESEARCH_EVAL_TOKENS` change what a score means, so a run under different values is not comparable to the ones before it.
+- Set any environment variable other than `AUTORESEARCH_NOTE` and `AUTORESEARCH_TESTING_PLAN`. The harness is configured through env vars (see `.env.example`), and several of them define the experiment rather than participate in it. `AUTORESEARCH_SEED` especially: changing seeds until one scores well is not a research result, it is shopping for a lucky initialisation, and the ratchet cannot tell the difference. `AUTORESEARCH_GOAL`, `AUTORESEARCH_TIME_BUDGET` and `AUTORESEARCH_EVAL_TOKENS` change what a score means, so a run under different values is not comparable to the ones before it.
 
 **The goal: get the lowest `score`.** The script prints it; `objective.py` defines it. Under the default goal (`min_bpb`) the score is just `val_bpb`, so this is the same thing as before — but read the `goal:` line rather than assuming, because the human can change it between runs and a different goal may price in memory, model size or other costs.
 
@@ -76,10 +76,10 @@ Note that the script is configured to always stop after 5 minutes, so depending 
 grep "^goal:\|^score:\|^val_bpb:\|^peak_vram_mb:" run.log
 ```
 
-The same numbers are written to `run.json` in machine-readable form, which is easier if you want more than one metric:
+The same numbers are written to a `run-<timestamp>.json` in machine-readable form (a fresh file per run, so it never overwrites the previous one), which is easier if you want more than one metric:
 
 ```
-cat run.json
+cat "$(ls -t run-*.json | head -1)"
 ```
 
 ## Logging results
@@ -116,11 +116,12 @@ the point of using JSON rather than fixed columns:
 
 ```json
 {"timestamp": "2026-08-04T02:14:07", "commit": "a1b2c3d", "branch": "autoresearch/aug4",
- "note": "increase LR to 0.04", "status": "keep", "goal": "min_bpb", "score": 0.9932,
- "val_bpb": 0.9932, "peak_vram_gb": 44.2, "num_params_M": 50.3, "num_steps": 953}
+ "note": "increase LR to 0.04", "testing_plan": "experiment-catalogue.md", "status": "keep",
+ "goal": "min_bpb", "score": 0.9932, "val_bpb": 0.9932, "peak_vram_gb": 44.2,
+ "num_params_M": 50.3, "num_steps": 953}
 ```
 
-Do not commit `results.jsonl` or `run.json` — both are gitignored.
+Do not commit `results.jsonl` or `run-*.json` — both are gitignored.
 
 ## The experiment loop
 
@@ -131,8 +132,8 @@ LOOP FOREVER:
 1. Look at the git state: the current branch/commit we're on
 2. Tune `train.py` with an experimental idea by directly hacking the code.
 3. git commit
-4. Run the experiment, passing a one-line description so the record is labelled:
-   `AUTORESEARCH_NOTE="increase LR to 0.04" uv run train.py > run.log 2>&1`
+4. Run the experiment, passing a one-line description and the testing plan you're following so the record is labelled:
+   `AUTORESEARCH_NOTE="increase LR to 0.04" AUTORESEARCH_TESTING_PLAN="experiment-catalogue.md" uv run train.py > run.log 2>&1`
    (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^goal:\|^score:\|^val_bpb:\|^peak_vram_mb:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up — and if nothing was appended to `results.jsonl`, call `objective.log_crash(...)` so the failure is still counted.
