@@ -9,8 +9,8 @@ wheels/
 # Virtual environments
 .venv
 worktrees/
-results/
 queue/
+.entire/
 
 # Agent prompt files (generated per-session by launchers)
 CLAUDE.md
