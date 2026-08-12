@@ -147,23 +147,31 @@ def collect_hyperparams(namespace):
     return params
 
 
-def _preflight(uri, timeout=2.0):
+def _preflight(uri, timeout=5.0):
     """
-    Cheap TCP reachability check before handing off to MLflow.
+    Cheap reachability check before handing off to MLflow.
 
     MLflow's own retry policy turns an unreachable host into ~35s per run, which
     over an overnight loop is about an hour of lost wall clock. A refused or
-    timed-out connect here costs 2s instead. Returns True for non-HTTP URIs
-    (sqlite, databricks, ...), which have no host to probe.
+    timed-out request here costs a few seconds instead. Returns True for
+    non-HTTP URIs (sqlite, databricks, ...), which have no host to probe.
+
+    Sends a real minimal HTTP request rather than a bare TCP connect+close:
+    behind an HTTP-inspecting transparent proxy (e.g. a sandboxed environment
+    routing egress through a policy-enforcing proxy), a connection opened and
+    closed without ever sending request bytes has nothing for the proxy to
+    route on and hangs to the timeout, producing a false "unreachable" even
+    when the server is fine. A real request is what MLflow itself will send
+    next anyway, so this only duplicates work that already has to happen.
     """
     try:
         from urllib.parse import urlparse
+        import urllib.request
 
         parsed = urlparse(uri)
         if parsed.scheme not in ("http", "https"):
             return True
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        socket.create_connection((parsed.hostname, port), timeout=timeout).close()
+        urllib.request.urlopen(uri, timeout=timeout)
         return True
     except Exception as e:
         _warn(f"{uri} unreachable ({type(e).__name__}), running untracked")
