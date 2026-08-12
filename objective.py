@@ -319,6 +319,8 @@ def report(model, tokenizer, batch_size, stats):
     # results.jsonl line for the same run always agree on when it happened.
     metrics["timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%S")
     metrics["testing_plan"] = os.environ.get("AUTORESEARCH_TESTING_PLAN", "")
+    metrics["agent"] = os.environ.get("AUTORESEARCH_AGENT", "")
+    metrics["model"] = os.environ.get("AUTORESEARCH_MODEL", "")
 
     _print_summary(metrics)
     _write_run_json(metrics)
@@ -420,6 +422,8 @@ def log_crash(note=None):
         "branch": _git("rev-parse", "--abbrev-ref", "HEAD", default="unknown"),
         "note": note if note is not None else os.environ.get("AUTORESEARCH_NOTE", ""),
         "testing_plan": os.environ.get("AUTORESEARCH_TESTING_PLAN", ""),
+        "agent": os.environ.get("AUTORESEARCH_AGENT", ""),
+        "model": os.environ.get("AUTORESEARCH_MODEL", ""),
         "status": "crash",
         "goal": GOAL,
         "score": None,
