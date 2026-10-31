@@ -27,3 +27,6 @@ results.tsv
 results.jsonl
 run-*.json
 run.log
+
+# Literature-guided research notes (program-literature.md) — snapshot to results/ instead
+research/
