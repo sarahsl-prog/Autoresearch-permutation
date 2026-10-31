@@ -52,6 +52,7 @@ def _run_json_path(timestamp):
     stamp = timestamp.replace("-", "").replace(":", "").replace("T", "-")
     return os.path.join(_REPO_DIR, f"run-{stamp}.json")
 
+
 # The random seed lives here, not in train.py, because the agent must not be able
 # to reach it. A seed is not a hyperparameter — an agent free to change it can
 # lower its score by shopping for a lucky initialisation, which the ratchet would

@@ -15,6 +15,7 @@ The repo is deliberately kept small and only really has three files that matter:
 - **`tracking.py`** — MLflow logging for each experiment. Not modified by the agent.
 - **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
 - **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+- **`program-literature.md`** — optional variant of `program.md` that draws experiment ideas from published papers, tests one mechanism per module against a fixed champion, and only promotes combinations that clear a noise margin. Adapted from ScholarEvolve (arXiv:2609.40169).
 
 By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
 
